@@ -313,254 +313,8 @@ struct UndoHistory {
 //file_system
 class Editor {
 public:
-    TextBuffer      buf;
-    TextBuffer::Pos cursor;
-    TextBuffer::Pos selAnchor;
-    bool            hasSelection = false;
-    int PADDING = PG;
-    // IME
-    std::string imeComposing;
-    int         imeCursor = 0;
-
-    // Undo
-    UndoHistory history;
-
-    // Layout (set by Renderer each frame)
-    int scrollRow = 0, scrollX = 0;
-    int lineH = 0, viewRows = 0, viewW = 0;
-
-    // txbox-locate
-    int TX_X = 10, TX_Y = 20;
-    int TX_W = 600, TX_H = 400;
-
-    // Caret blink
-    Uint32 lastBlink = 0;
-    bool   caretOn = true;
-
-    void init() { cursor = { 0,0 }; selAnchor = { 0,0 }; }
-
-    // ---- Selection ----
-    TextBuffer::Pos selMin() const { return cursor < selAnchor ? cursor : selAnchor; }
-    TextBuffer::Pos selMax() const { return cursor < selAnchor ? selAnchor : cursor; }
-    void clearSelection() { hasSelection = false; selAnchor = cursor; }
-    void startSelection() { if (!hasSelection) { hasSelection = true; selAnchor = cursor; } }
-    void selectAll() {
-        hasSelection = true; selAnchor = { 0,0 };
-        cursor = { buf.numLines() - 1, buf.lineLen(buf.numLines() - 1) };
-    }
-    std::string selectedText() const {
-        return hasSelection ? buf.extract(selMin(), selMax()) : "";
-    }
-
-    // ---- Text insertion (records Insert or Replace command) ----
-    void insertText(const std::string& text) {
-        EditCommand cmd;
-        cmd.cursorBefore = cursor;
-
-        if (hasSelection) {
-            cmd.kind = EditKind::Replace;
-            cmd.pos = selMin();
-            cmd.deleted = buf.extract(selMin(), selMax());
-            buf.erase(selMin(), selMax());
-            cursor = selMin();
-            clearSelection();
-        }
-        else {
-            cmd.kind = EditKind::Insert;
-            cmd.pos = cursor;
-        }
-
-        cmd.inserted = text;
-        cursor = buf.insert(cursor, text);
-        cmd.cursorAfter = cursor;
-        clearSelection();
-        history.push(cmd);
-        ensureCursorVisible();
-    }
-
-    void insertNewline() { insertText("\n"); }
-
-    // ---- Backspace (records Delete command) ----
-    void backspace() {
-        if (hasSelection) { deleteSelection(); return; }
-        if (cursor.col == 0 && cursor.row == 0) return;
-
-        TextBuffer::Pos from = cursor;
-        if (cursor.col == 0) {
-            from = { cursor.row - 1, buf.lineLen(cursor.row - 1) };
-        }
-        else {
-            from.col = utf8::prev(buf.line(cursor.row), cursor.col);
-        }
-
-        EditCommand cmd;
-        cmd.kind = EditKind::Delete;
-        cmd.pos = from;
-        cmd.deleted = buf.extract(from, cursor);
-        cmd.cursorBefore = cursor;
-        cmd.cursorAfter = from;   // cursor == pos ⟹ backspace flag for merging
-        buf.erase(from, cursor);
-        cursor = from;
-        clearSelection();
-        history.push(cmd);
-        ensureCursorVisible();
-    }
-
-    // ---- Forward delete (records Delete command) ----
-    void deleteForward() {
-        if (hasSelection) { deleteSelection(); return; }
-        TextBuffer::Pos to = cursor;
-        if (to.col < buf.lineLen(to.row))
-            to.col = utf8::next(buf.line(to.row), to.col);
-        else if (to.row < buf.numLines() - 1)
-            to = { cursor.row + 1, 0 };
-        else return;
-
-        EditCommand cmd;
-        cmd.kind = EditKind::Delete;
-        cmd.pos = cursor;
-        cmd.deleted = buf.extract(cursor, to);
-        cmd.cursorBefore = cursor;
-        cmd.cursorAfter = cursor;  // cursor stays ⟹ forward-delete flag
-        buf.erase(cursor, to);
-        clearSelection();
-        history.push(cmd);
-        ensureCursorVisible();
-    }
-
-    // ---- Delete selection (records Replace command with empty insert) ----
-    void deleteSelection() {
-        if (!hasSelection) return;
-        EditCommand cmd;
-        cmd.kind = EditKind::Replace;
-        cmd.pos = selMin();
-        cmd.deleted = buf.extract(selMin(), selMax());
-        cmd.inserted = "";
-        cmd.cursorBefore = cursor;
-        cmd.cursorAfter = selMin();
-        buf.erase(selMin(), selMax());
-        cursor = selMin();
-        clearSelection();
-        history.push(cmd);
-        ensureCursorVisible();
-    }
-
-    // ---- Undo / Redo ----
-    void doUndo() {
-        if (!history.canUndo()) return;
-        cursor = history.undo(buf);
-        clearSelection(); buf.clamp(cursor);
-        ensureCursorVisible();
-    }
-    void doRedo() {
-        if (!history.canRedo()) return;
-        cursor = history.redo(buf);
-        clearSelection(); buf.clamp(cursor);
-        ensureCursorVisible();
-    }
-
-    // ---- Cursor movement ----
-    void moveCursor(TextBuffer::Pos p, bool select) {
-        if (select) startSelection(); else clearSelection();
-        cursor = p; buf.clamp(cursor); ensureCursorVisible();
-    }
-    void moveLeft(bool sel, bool word) {
-        TextBuffer::Pos p = cursor;
-        if (!sel && hasSelection) { p = selMin(); clearSelection(); cursor = p; ensureCursorVisible(); return; }
-        if (word) {
-            if (p.col > 0) p.col = utf8::prevWord(buf.line(p.row), p.col);
-            else if (p.row > 0) { p.row--; p.col = buf.lineLen(p.row); }
-        }
-        else {
-            if (p.col > 0) p.col = utf8::prev(buf.line(p.row), p.col);
-            else if (p.row > 0) { p.row--; p.col = buf.lineLen(p.row); }
-        }
-        moveCursor(p, sel);
-    }
-    void moveRight(bool sel, bool word) {
-        TextBuffer::Pos p = cursor;
-        if (!sel && hasSelection) { p = selMax(); clearSelection(); cursor = p; ensureCursorVisible(); return; }
-        if (word) {
-            if (p.col < buf.lineLen(p.row)) p.col = utf8::nextWord(buf.line(p.row), p.col);
-            else if (p.row < buf.numLines() - 1) { p.row++; p.col = 0; }
-        }
-        else {
-            if (p.col < buf.lineLen(p.row)) p.col = utf8::next(buf.line(p.row), p.col);
-            else if (p.row < buf.numLines() - 1) { p.row++; p.col = 0; }
-        }
-        moveCursor(p, sel);
-    }
-    void moveUp(bool sel) {
-        if (cursor.row == 0) { moveCursor({ 0,0 }, sel); return; }
-        moveCursor({ cursor.row - 1, cursor.col }, sel);
-    }
-    void moveDown(bool sel) {
-        if (cursor.row == buf.numLines() - 1) { moveCursor({ cursor.row, buf.lineLen(cursor.row) }, sel); return; }
-        moveCursor({ cursor.row + 1, cursor.col }, sel);
-    }
-    void moveHome(bool sel, bool ctrl) {
-        moveCursor(ctrl ? TextBuffer::Pos{ 0,0 } : TextBuffer::Pos{ cursor.row,0 }, sel);
-    }
-    void moveEnd(bool sel, bool ctrl) {
-        int lr = ctrl ? buf.numLines() - 1 : cursor.row;
-        moveCursor({ lr, buf.lineLen(lr) }, sel);
-    }
-
-    // ---- Clipboard ----
-    void copy() { if (hasSelection) SDL_SetClipboardText(selectedText().c_str()); }
-    void cut() { if (!hasSelection) return; copy(); deleteSelection(); }
-    void paste() {
-        if (!SDL_HasClipboardText()) return;
-        char* txt = SDL_GetClipboardText();
-        if (txt) {
-            std::string s(txt);
-            SDL_free(txt);
-
-            // ★ CR を除去（Windows の CRLF 対策）
-            s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
-
-            insertText(s);
-        }
-    }
-
-
-    // ---- Scroll ----
-    void ensureCursorVisible() {
-        if (lineH <= 0 || viewRows <= 0) return;
-        if (cursor.row < scrollRow) scrollRow = cursor.row;
-        if (cursor.row >= scrollRow + viewRows) scrollRow = cursor.row - viewRows + 1;
-    }
-
-    // ---- Mouse hit-test ----
-    TextBuffer::Pos hitTest(int px, int py, TTF_Font* font) const {
-        px -= TX_X + PADDING + 35;
-        py -= TX_Y;
-        int row = scrollRow + (py - PADDING) / lineH;
-        row = std::clamp(row, 0, buf.numLines() - 1);
-        const std::string& ln = buf.line(row);
-        if (ln.empty()) return { row, 0 };
-        int best = 0, bestDist = INT_MAX, i = 0;
-        while (true) {
-            int w = 0, h = 0; TTF_SizeUTF8(font, ln.substr(0, i).c_str(), &w, &h);
-            int d = std::abs(w - (px - PADDING + scrollX));
-            if (d < bestDist) { bestDist = d; best = i; }
-            if (i >= (int)ln.size()) break;
-            i = utf8::next(ln, i);
-        }
-        return { row, best };
-    }
-
-    // ---- Caret blink ----
-    void tickBlink() {
-        Uint32 now = SDL_GetTicks();
-        if (now - lastBlink > BLINK_MS) { caretOn = !caretOn; lastBlink = now; }
-    }
-    void resetBlink() { caretOn = true; lastBlink = SDL_GetTicks(); }
-};
-class limit_Editor {
-public:
-	int limit = 2;
-	bool lim_f = true;
+    bool lim_f = false;
+    int limit = 0;
     TextBuffer      buf;
     TextBuffer::Pos cursor;
     TextBuffer::Pos selAnchor;
@@ -620,6 +374,7 @@ public:
             cmd.kind = EditKind::Insert;
             cmd.pos = cursor;
         }
+
         cmd.inserted = text;
         cursor = buf.insert(cursor, text);
         cmd.cursorAfter = cursor;
@@ -807,6 +562,7 @@ public:
     }
     void resetBlink() { caretOn = true; lastBlink = SDL_GetTicks(); }
 };
+
 class file_explorer {
     public:
     bool ex_file = true;
@@ -815,7 +571,7 @@ class file_explorer {
     int PADDING = PG;
     fs::path p = fs::current_path();
     std::vector<file_enum> file_lists;
-	limit_Editor ed;
+	Editor ed;
     void init(int lineH){
         ed.cursor = { 0,0 };
         ed.lineH = lineH;
@@ -845,22 +601,27 @@ class file_explorer {
             std::cerr << "Error accessing directory: " << e.what() << std::endl;
         }
     }
-    void path_set(SDL_Event* e){
-        const std::string& ln = ed.buf.line(0);
-        fs::path temp_path = (ln);
-        if(fs::exists(temp_path)){
-            ex_file = true;
-            //std::cout << "ok" << std::endl;
-            temp_path = fs::absolute(temp_path);
-            p = temp_path;
+    void path_set(bool path_use,fs::path t_p){
+        if(!path_use){
+            const std::string& ln = ed.buf.line(0);
+            fs::path temp_path = (ln);
+            if(fs::exists(temp_path)){
+                ex_file = true;
+                temp_path = fs::absolute(temp_path);
+                p = temp_path;
+                now_list();
+                file_sort();
+            }else{
+                ex_file = false;
+            }
+            ed.buf.setAllText(p.string());
+            ed.cursor = { 0,0 };
+        }else{
+            p = t_p;
+            ed.buf.setAllText(t_p.string());
             now_list();
             file_sort();
-        }else{
-            ex_file = false;
-            //std::cout << "no" << std::endl;
         }
-        ed.buf.setAllText(p.string());
-        ed.cursor = { 0,0 };
 	}
     void now_list(){
         try{
@@ -873,6 +634,7 @@ class file_explorer {
                 file_lists.push_back(fil);
             }
         }catch(const fs::filesystem_error& e){
+            file_lists[0].subs_path = "Error accessing directory:";
             std::cerr << "Error accessing directory: " << e.what() << std::endl;
         }
     }
@@ -883,14 +645,18 @@ class file_explorer {
             return a.subs_path.filename() < b.subs_path.filename();
         });
 	}
-    void hitscan(SDL_Point mousePos,bool click) {
-		if (file_lists.empty()) return;
+    bool hitscan(SDL_Point mousePos,bool click,bool doubleclick) {
+		if (file_lists.empty()) return false;
         SDL_Rect hit = {F_X,F_Y,F_W,F_H};
         bool before = false;
         for (size_t i = 0; i < file_lists.size(); ++i) {
             hit = { F_X + PADDING,int(F_Y + i * 20 - scrollRow * 20 + ed.TX_H),F_W - PADDING,20 };
             file_lists[i].rect = hit;
 			before = file_lists[i].selected;
+            if(doubleclick && SDL_PointInRect(&mousePos, &hit)){
+                path_set(true,file_lists[i].subs_path);
+                return true;
+            }
             if(click){
                 file_lists[i].selected = SDL_PointInRect(&mousePos, &hit);
             }
@@ -900,6 +666,12 @@ class file_explorer {
                 file_lists[i].selected = false;
             }
         }
+        return false;
+    }
+    void back_path(){
+        fs::path temp = ed.buf.line(0);
+        ed.buf.setAllText(temp.parent_path().string());
+        path_set(false,"");
     }
 };
 
@@ -1018,7 +790,7 @@ public:
 
         if (ed.scrollX < 0) ed.scrollX = 0;
     }
-    void adjustHorizontalScroll_sh(limit_Editor& ed) {
+    void adjustHorizontalScroll_sh(Editor& ed) {
         const std::string& ln = ed.buf.line(ed.cursor.row);
         int cx = textWidth(ln.substr(0, ed.cursor.col));
 
@@ -1141,7 +913,7 @@ public:
         drawText(status, PADDING + ed.TX_X, ed.TX_Y + ed.TX_H - PADDING - 4, colLineno);
         adjustHorizontalScroll(ed);
     }
-    void TextBoxsh(limit_Editor& ed) {
+    void TextBoxsh(Editor& ed) {
         int winW, winH; SDL_GetWindowSize(win, &winW, &winH);
         ed.lineH = lineH;
         ed.viewRows = (ed.TX_H - ed.PADDING * 2) / lineH;
@@ -1283,5 +1055,5 @@ public:
 };
 
 void textEditEvent(SDL_Event& e, Editor& ed, Renderer& renderer, bool& mouseDown, int mox, int moy);
-void textEditEvent_sh(SDL_Event& e, limit_Editor& ed, Renderer& renderer, bool& mouseDown, int mox, int moy);
+void textEditEvent_sh(SDL_Event& e, Editor& ed, Renderer& renderer, bool& mouseDown, int mox, int moy);
 void file_explorer_event(SDL_Event& e,file_explorer& fi);
