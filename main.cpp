@@ -61,7 +61,7 @@ int main(int argc, char* argv[]) {
                 switch (e.key.keysym.sym) {
                 case SDLK_RETURN:
                 case SDLK_KP_ENTER:
-                    nm.path_set(nullptr);
+                    nm.path_set(false,"");
                     break;
                 }
                 break;
